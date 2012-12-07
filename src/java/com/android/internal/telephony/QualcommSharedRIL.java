@@ -397,7 +397,7 @@ public class QualcommSharedRIL extends RIL implements CommandsInterface {
         if (error == 0 || p.dataAvail() > 0) {
 
             /* Convert RIL_REQUEST_GET_MODEM_VERSION back */
-            if (SystemProperties.get("ro.cm.device").indexOf("e73") == 0 &&
+            if (SystemProperties.get("ro.product.device").indexOf("e73") == 0 &&
                   rr.mRequest == 220) {
                 rr.mRequest = RIL_REQUEST_BASEBAND_VERSION;
             }
