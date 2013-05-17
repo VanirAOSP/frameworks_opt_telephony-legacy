@@ -189,5 +189,4 @@ public class HTCQualcommRIL extends RIL implements CommandsInterface {
                 break;
         }
     }
-
 }
