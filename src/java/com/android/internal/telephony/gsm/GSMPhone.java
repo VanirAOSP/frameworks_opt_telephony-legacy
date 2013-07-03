@@ -160,7 +160,7 @@ public class GSMPhone extends PhoneBase {
         mCM.setOnUSSD(this, EVENT_USSD, null);
         mCM.setOnSuppServiceNotification(this, EVENT_SSN, null);
         mSST.registerForNetworkAttached(this, EVENT_REGISTERED_TO_NETWORK, null);
-
+        
         // problem with javac 7 (create an empty class)
 
         // if (false) {
@@ -855,12 +855,12 @@ public class GSMPhone extends PhoneBase {
 
     public String getSubscriberId() {
         IccRecords r = mIccRecords.get();
-        return (r != null) ? r.getIMSI() : null;
+        return (r != null) ? r.getIMSI() : "";
     }
 
     public String getLine1Number() {
         IccRecords r = mIccRecords.get();
-        return (r != null) ? r.getMsisdnNumber() : null;
+        return (r != null) ? r.getMsisdnNumber() : "";
     }
 
     @Override

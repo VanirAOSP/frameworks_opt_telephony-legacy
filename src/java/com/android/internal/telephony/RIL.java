@@ -25,6 +25,7 @@ import static android.telephony.TelephonyManager.NETWORK_TYPE_HSDPA;
 import static android.telephony.TelephonyManager.NETWORK_TYPE_HSUPA;
 import static android.telephony.TelephonyManager.NETWORK_TYPE_HSPA;
 import static android.telephony.TelephonyManager.NETWORK_TYPE_HSPAP;
+import static android.telephony.TelephonyManager.NETWORK_TYPE_DCHSPAP;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -230,9 +231,6 @@ public class RIL extends BaseCommands implements CommandsInterface {
     // EVENT_SEND and decreases while handling EVENT_SEND. It gets cleared while
     // WAKE_LOCK_TIMEOUT occurs.
     int mRequestMessagesPending;
-
-    private final Object mPendingLock = new Object();
-
     // The number of requests sent out but waiting for response. It increases while
     // sending request and decreases while handling response. It should match
     // mRequestList.size() unless there are requests no replied while
@@ -324,10 +322,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
                         if (s == null) {
                             rr.onError(RADIO_NOT_AVAILABLE, null);
                             rr.release();
-                            synchronized (mPendingLock) {
-                                if (mRequestMessagesPending > 0)
-                                    mRequestMessagesPending--;
-                            }
+                            if (mRequestMessagesPending > 0)
+                                mRequestMessagesPending--;
                             alreadySubtracted = true;
                             return;
                         }
@@ -337,10 +333,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
                             mRequestMessagesWaiting++;
                         }
 
-                        synchronized (mPendingLock) {
-                            if (mRequestMessagesPending > 0)
-                                mRequestMessagesPending--;
-                        }
+                        if (mRequestMessagesPending > 0)
+                            mRequestMessagesPending--;
                         alreadySubtracted = true;
 
                         byte[] data;
@@ -389,10 +383,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
                         releaseWakeLockIfDone();
                     }
 
-                    synchronized (mPendingLock) {
-                        if (!alreadySubtracted && mRequestMessagesPending > 0) {
-                            mRequestMessagesPending--;
-                        }
+                    if (!alreadySubtracted && mRequestMessagesPending > 0) {
+                        mRequestMessagesPending--;
                     }
 
                     break;
@@ -927,7 +919,6 @@ public class RIL extends BaseCommands implements CommandsInterface {
 
         rr.mp.writeString(address);
         rr.mp.writeInt(clirMode);
-        rr.mp.writeInt(0); // UUS information is absent
 
         if (uusInfo == null) {
             rr.mp.writeInt(0); // UUS information is absent
@@ -2169,9 +2160,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
 
     private void
     acquireWakeLock() {
-        synchronized (mPendingLock) {
-            mRequestMessagesPending++;
-        }
+        mRequestMessagesPending++;
         synchronized (mWakeLock) {
             mWakeLock.acquire();
 
@@ -3427,6 +3416,8 @@ public class RIL extends BaseCommands implements CommandsInterface {
            radioType = NETWORK_TYPE_HSPA;
        } else if (radioString.equals("HSPAP")) {
            radioType = NETWORK_TYPE_HSPAP;
+       } else if (radioString.equals("DCHSPAP")) {
+           radioType = NETWORK_TYPE_DCHSPAP;
        } else {
            radioType = NETWORK_TYPE_UNKNOWN;
        }
