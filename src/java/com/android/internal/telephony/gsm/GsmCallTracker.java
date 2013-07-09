@@ -82,7 +82,7 @@ public final class GsmCallTracker extends CallTracker {
     boolean hangupPendingMO;
 
     //Used to re-request the list of current calls
-    boolean slow_modem = (SystemProperties.getInt("ro.telephony.slow_modem",0) != 0);
+    boolean slowModem = (SystemProperties.getInt("ro.telephony.slowModem",0) != 0);
 
     GSMPhone phone;
 
@@ -435,13 +435,8 @@ public final class GsmCallTracker extends CallTracker {
         boolean needsPollDelay = false;
         boolean unknownConnectionAppeared = false;
 
-        if (slow_modem) {
-            if (polledCalls.size() == 0 && !hangupPendingMO){
-                try {
-                   Thread.sleep(250);
-                }  catch(InterruptedException ex) {
-                     Thread.currentThread().interrupt();
-                }
+        if (slowModem) {
+            if (polledCalls.size() == 0 && !hangupPendingMO && pendingMO != null) {
                 lastRelevantPoll = obtainMessage(EVENT_POLL_CALLS_RESULT);
                 cm.getCurrentCalls(lastRelevantPoll);
                 return;
