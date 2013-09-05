@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # enable this build only when platform library is available
+ifeq ($(TARGET_TELEPHONY_VARIANT), legacy)
 ifeq ($(TARGET_BUILD_JAVA_SUPPORT_LEVEL),platform)
 
 LOCAL_PATH := $(call my-dir)
@@ -39,3 +40,4 @@ include $(BUILD_JAVA_LIBRARY)
 include $(call all-makefiles-under,$(LOCAL_PATH))
 
 endif # JAVA platform
+endif # LEGACY
