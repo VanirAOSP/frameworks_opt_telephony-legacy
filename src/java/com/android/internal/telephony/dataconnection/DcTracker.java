@@ -35,6 +35,7 @@ import android.net.NetworkUtils;
 import android.net.ProxyProperties;
 import android.net.Uri;
 import android.os.AsyncResult;
+import android.os.Build;
 import android.os.Message;
 import android.os.Messenger;
 import android.os.SystemClock;
@@ -57,6 +58,8 @@ import com.android.internal.telephony.DctConstants;
 import com.android.internal.telephony.EventLogTags;
 import com.android.internal.telephony.TelephonyIntents;
 import com.android.internal.telephony.gsm.GSMPhone;
+import com.android.internal.telephony.cdma.CDMAPhone;
+import com.android.internal.telephony.cdma.CdmaSubscriptionSourceManager;
 import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.RILConstants;
 import com.android.internal.telephony.uicc.IccRecords;
@@ -112,6 +115,8 @@ public final class DcTracker extends DcTrackerBase {
     /** Watches for changes to the APN db. */
     private ApnChangeObserver mApnObserver;
 
+    private CdmaSubscriptionSourceManager mCdmaSsm;
+
     //***** Constructor
 
     public DcTracker(PhoneBase p) {
@@ -137,6 +142,16 @@ public final class DcTracker extends DcTrackerBase {
                 DctConstants.EVENT_PS_RESTRICT_ENABLED, null);
         p.getServiceStateTracker().registerForPsRestrictedDisabled(this,
                 DctConstants.EVENT_PS_RESTRICT_DISABLED, null);
+        p.getServiceStateTracker().registerForDataRegStateOrRatChanged(this,
+                DctConstants.EVENT_DATA_RAT_CHANGED, null);
+
+        if (p.getPhoneType() == PhoneConstants.PHONE_TYPE_CDMA) {
+            mCdmaSsm = CdmaSubscriptionSourceManager.getInstance(
+                    p.getContext(), p.mCi, this,
+                    DctConstants.EVENT_CDMA_SUBSCRIPTION_SOURCE_CHANGED, null);
+            // CdmaSsm doesn't send this event whenever you register - fake it ourselves
+            sendMessage(obtainMessage(DctConstants.EVENT_CDMA_SUBSCRIPTION_SOURCE_CHANGED));
+        }
 
         mDataConnectionTracker = this;
 
@@ -168,7 +183,7 @@ public final class DcTracker extends DcTrackerBase {
 
     @Override
     public void dispose() {
-        if (DBG) log("GsmDCT.dispose");
+        if (DBG) log("dispose");
         cleanUpAllConnections(true, null);
 
         super.dispose();
@@ -190,7 +205,11 @@ public final class DcTracker extends DcTrackerBase {
 
         mPhone.getContext().getContentResolver().unregisterContentObserver(mApnObserver);
         mApnContexts.clear();
+        mPrioritySortedApnContexts.clear();
 
+        if (mCdmaSsm != null) {
+            mCdmaSsm.dispose(this);
+        }
         destroyDataConnections();
     }
 
@@ -230,9 +249,9 @@ public final class DcTracker extends DcTrackerBase {
     }
 
     private ApnContext addApnContext(String type, NetworkConfig networkConfig) {
-        ApnContext apnContext = new ApnContext(mPhone.getContext(), type, LOG_TAG);
-        apnContext.setDependencyMet(networkConfig.dependencyMet);
+        ApnContext apnContext = new ApnContext(mPhone.getContext(), type, LOG_TAG, networkConfig);
         mApnContexts.put(type, apnContext);
+        mPrioritySortedApnContexts.add(apnContext);
         return apnContext;
     }
 
@@ -572,10 +591,11 @@ public final class DcTracker extends DcTrackerBase {
         boolean desiredPowerState = mPhone.getServiceStateTracker().getDesiredPowerState();
         IccRecords r = mIccRecords.get();
         boolean recordsLoaded = (r != null) ? r.getRecordsLoaded() : false;
+        boolean subscriptionFromNv = isNvSubscription();
 
         boolean allowed =
                     (attachedState || mAutoAttachOnCreation) &&
-                    recordsLoaded &&
+                    (subscriptionFromNv || recordsLoaded) &&
                     (mPhone.getState() == PhoneConstants.State.IDLE ||
                      mPhone.getServiceStateTracker().isConcurrentVoiceAndDataAllowed()) &&
                     internalDataEnabled &&
@@ -587,7 +607,9 @@ public final class DcTracker extends DcTrackerBase {
             if (!(attachedState || mAutoAttachOnCreation)) {
                 reason += " - Attached= " + attachedState;
             }
-            if (!recordsLoaded) reason += " - SIM not loaded";
+            if (!(subscriptionFromNv || recordsLoaded)) {
+                reason += " - SIM not loaded and not NV subscription";
+            }
             if (mPhone.getState() != PhoneConstants.State.IDLE &&
                     !mPhone.getServiceStateTracker().isConcurrentVoiceAndDataAllowed()) {
                 reason += " - PhoneState= " + mPhone.getState();
@@ -605,7 +627,10 @@ public final class DcTracker extends DcTrackerBase {
     }
 
     private void setupDataOnConnectableApns(String reason) {
-        for (ApnContext apnContext : mApnContexts.values()) {
+        if (DBG) log("setupDataOnConnectableApns: " + reason);
+
+        for (ApnContext apnContext : mPrioritySortedApnContexts) {
+            if (DBG) log("setupDataOnConnectableApns: apnContext " + apnContext);
             if (apnContext.getState() == DctConstants.State.FAILED) {
                 apnContext.setState(DctConstants.State.IDLE);
             }
@@ -615,28 +640,6 @@ public final class DcTracker extends DcTrackerBase {
                 trySetupData(apnContext);
             }
         }
-    }
-
-    private boolean trySetupData(String reason, String type) {
-        if (DBG) {
-            log("trySetupData: " + type + " due to " + (reason == null ? "(unspecified)" : reason)
-                    + " isPsRestricted=" + mIsPsRestricted);
-        }
-
-        if (type == null) {
-            type = PhoneConstants.APN_TYPE_DEFAULT;
-        }
-
-        ApnContext apnContext = mApnContexts.get(type);
-
-        if (apnContext == null ){
-            if (DBG) log("trySetupData new apn context for type:" + type);
-            apnContext = new ApnContext(mPhone.getContext(), type, LOG_TAG);
-            mApnContexts.put(type, apnContext);
-        }
-        apnContext.setReason(reason);
-
-        return trySetupData(apnContext);
     }
 
     private boolean trySetupData(ApnContext apnContext) {
@@ -733,11 +736,16 @@ public final class DcTracker extends DcTrackerBase {
      * @param tearDown true if the underlying DataConnection should be
      * disconnected.
      * @param reason reason for the clean up.
+     * @return boolean - true if we did cleanup any connections, false if they
+     *                   were already all disconnected.
      */
-    protected void cleanUpAllConnections(boolean tearDown, String reason) {
+    protected boolean cleanUpAllConnections(boolean tearDown, String reason) {
         if (DBG) log("cleanUpAllConnections: tearDown=" + tearDown + " reason=" + reason);
+        boolean didDisconnect = false;
 
         for (ApnContext apnContext : mApnContexts.values()) {
+            if (apnContext.isDisconnected() == false) didDisconnect = true;
+            // TODO - only do cleanup if not disconnected
             apnContext.setReason(reason);
             cleanUpConnection(tearDown, apnContext);
         }
@@ -747,6 +755,7 @@ public final class DcTracker extends DcTrackerBase {
 
         // TODO: Do we need mRequestedApnType?
         mRequestedApnType = PhoneConstants.APN_TYPE_DEFAULT;
+        return didDisconnect;
     }
 
     /**
@@ -1067,6 +1076,29 @@ public final class DcTracker extends DcTrackerBase {
             }
         }
         if (dcac == null) {
+            if (isOnlySingleDcAllowed(radioTech)) {
+                if (isHigherPriorityApnContextActive(apnContext)) {
+                    if (DBG) {
+                        log("setupData: Higher priority ApnContext active.  Ignoring call");
+                    }
+                    return false;
+                }
+
+                // Only lower priority calls left.  Disconnect them all in this single PDP case
+                // so that we can bring up the requested higher priority call (once we receive
+                // repsonse for deactivate request for the calls we are about to disconnect
+                if (cleanUpAllConnections(true, Phone.REASON_SINGLE_PDN_ARBITRATION)) {
+                    // If any call actually requested to be disconnected, means we can't
+                    // bring up this connection yet as we need to wait for those data calls
+                    // to be disconnected.
+                    if (DBG) log("setupData: Some calls are disconnecting first.  Wait and retry");
+                    return false;
+                }
+
+                // No other calls are active, so proceed
+                if (DBG) log("setupData: Single pdp. Continue setting up data call.");
+            }
+
             dcac = findFreeDataConnection();
 
             if (dcac == null) {
@@ -1098,6 +1130,11 @@ public final class DcTracker extends DcTrackerBase {
      * Handles changes to the APN database.
      */
     private void onApnChanged() {
+        if (DBG) log("onApnChanged: tryRestartDataConnections");
+        tryRestartDataConnections(Phone.REASON_APN_CHANGED);
+    }
+
+    private void tryRestartDataConnections(String reason) {
         DctConstants.State overallState = getOverallState();
         boolean isDisconnected = (overallState == DctConstants.State.IDLE ||
                 overallState == DctConstants.State.FAILED);
@@ -1109,12 +1146,12 @@ public final class DcTracker extends DcTrackerBase {
 
         // TODO: It'd be nice to only do this if the changed entrie(s)
         // match the current operator.
-        if (DBG) log("onApnChanged: createAllApnList and cleanUpAllConnections");
+        if (DBG) log("tryRestartDataConnections: createAllApnList and cleanUpAllConnections");
         createAllApnList();
         setInitialAttachApn();
-        cleanUpAllConnections(!isDisconnected, Phone.REASON_APN_CHANGED);
+        cleanUpAllConnections(!isDisconnected, reason);
         if (isDisconnected) {
-            setupDataOnConnectableApns(Phone.REASON_APN_CHANGED);
+            setupDataOnConnectableApns(reason);
         }
     }
 
@@ -1200,6 +1237,45 @@ public final class DcTracker extends DcTrackerBase {
         mActiveApn = null;
     }
 
+    /**
+     * "Active" here means ApnContext isEnabled() and not in FAILED state
+     * @param apnContext to compare with
+     * @return true if higher priority active apn found
+     */
+    private boolean isHigherPriorityApnContextActive(ApnContext apnContext) {
+        for (ApnContext otherContext : mPrioritySortedApnContexts) {
+            if (apnContext.getApnType().equalsIgnoreCase(otherContext.getApnType())) return false;
+            if (otherContext.isEnabled() && otherContext.getState() != DctConstants.State.FAILED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Reports if we support multiple connections or not.
+     * This is a combination of factors, based on carrier and RAT.
+     * @param rilRadioTech the RIL Radio Tech currently in use
+     * @return true if only single DataConnection is allowed
+     */
+    private boolean isOnlySingleDcAllowed(int rilRadioTech) {
+        int[] singleDcRats = mPhone.getContext().getResources().getIntArray(
+                com.android.internal.R.array.config_onlySingleDcAllowed);
+        boolean onlySingleDcAllowed = false;
+        if (Build.IS_DEBUGGABLE &&
+                SystemProperties.getBoolean("persist.telephony.test.singleDc", false)) {
+            onlySingleDcAllowed = true;
+        }
+        if (singleDcRats != null) {
+            for (int i=0; i < singleDcRats.length && onlySingleDcAllowed == false; i++) {
+                if (rilRadioTech == singleDcRats[i]) onlySingleDcAllowed = true;
+            }
+        }
+
+        if (DBG) log("isOnlySingleDcAllowed(" + rilRadioTech + "): " + onlySingleDcAllowed);
+        return onlySingleDcAllowed;
+    }
+
     @Override
     protected void restartRadio() {
         if (DBG) log("restartRadio: ************TURN OFF RADIO**************");
@@ -1224,10 +1300,13 @@ public final class DcTracker extends DcTrackerBase {
      * @param reason the reason why data is disconnected
      * @return true if try setup data connection is need for this reason
      */
-    private boolean retryAfterDisconnected(String reason) {
+    private boolean retryAfterDisconnected(ApnContext apnContext) {
         boolean retry = true;
+        String reason = apnContext.getReason();
 
-        if ( Phone.REASON_RADIO_TURNED_OFF.equals(reason) ) {
+        if ( Phone.REASON_RADIO_TURNED_OFF.equals(reason) ||
+                (isOnlySingleDcAllowed(mPhone.getServiceState().getRilDataRadioTechnology())
+                 && isHigherPriorityApnContextActive(apnContext))) {
             retry = false;
         }
         return retry;
@@ -1286,6 +1365,12 @@ public final class DcTracker extends DcTrackerBase {
             notifyOffApnsOfAvailability(Phone.REASON_SIM_LOADED);
         }
         setupDataOnConnectableApns(Phone.REASON_SIM_LOADED);
+    }
+
+    private void onNvReady() {
+        if (DBG) log("onNvReady");
+        createAllApnList();
+        setupDataOnConnectableApns(Phone.REASON_NV_READY);
     }
 
     @Override
@@ -1790,6 +1875,7 @@ public final class DcTracker extends DcTrackerBase {
         // pending.
         if (isDisconnected()) {
             if (mPhone.getServiceStateTracker().processPendingRadioPowerOffAfterDataOff()) {
+                if(DBG) log("onDisconnectDone: radio will be turned off, no retries");
                 // Radio will be turned off. No need to retry data setup
                 apnContext.setApnSetting(null);
                 apnContext.setDataConnectionAc(null);
@@ -1798,16 +1884,34 @@ public final class DcTracker extends DcTrackerBase {
         }
 
         // If APN is still enabled, try to bring it back up automatically
-        if (mAttached.get() && apnContext.isReady()
-                && retryAfterDisconnected(apnContext.getReason())) {
-            SystemProperties.set(PUPPET_MASTER_RADIO_STRESS_TEST, "false");
-            // Wait a bit before trying the next APN, so that
-            // we're not tying up the RIL command channel.
-            // This also helps in any external dependency to turn off the context.
-            startAlarmForReconnect(getApnDelay(), apnContext);
+        if (mAttached.get() && apnContext.isReady() && retryAfterDisconnected(apnContext)) {
+            if (apnContext.getReason().equals(Phone.REASON_NW_TYPE_CHANGED)) {
+                // Retry immediately if reason is nw_type_changed (like rat switch, for instance)
+                setupDataOnConnectableApns(Phone.REASON_NW_TYPE_CHANGED);
+            } else {
+                SystemProperties.set(PUPPET_MASTER_RADIO_STRESS_TEST, "false");
+                // Wait a bit before trying the next APN, so that
+                // we're not tying up the RIL command channel.
+                // This also helps in any external dependency to turn off the context.
+                if(DBG) log("onDisconnectDone: attached, ready and retry after disconnect");
+                startAlarmForReconnect(getApnDelay(), apnContext);
+            }
         } else {
+            boolean restartRadioAfterProvisioning = mPhone.getContext().getResources().getBoolean(
+                    com.android.internal.R.bool.config_restartRadioAfterProvisioning);
+
+            if (apnContext.isProvisioningApn() && restartRadioAfterProvisioning) {
+                log("onDisconnectDone: restartRadio after provisioning");
+                restartRadio();
+            }
             apnContext.setApnSetting(null);
             apnContext.setDataConnectionAc(null);
+            if (isOnlySingleDcAllowed(mPhone.getServiceState().getRilDataRadioTechnology())) {
+                if(DBG) log("onDisconnectDone: isOnlySigneDcAllowed true so setup single apn");
+                setupDataOnConnectableApns(Phone.REASON_SINGLE_PDN_ARBITRATION);
+            } else {
+                if(DBG) log("onDisconnectDone: not retrying");
+            }
         }
     }
 
@@ -1917,14 +2021,43 @@ public final class DcTracker extends DcTrackerBase {
         notifyOffApnsOfAvailability(reason);
     }
 
+    private boolean isNvSubscription() {
+        int radioTech = mPhone.getServiceState().getRilDataRadioTechnology();
+        if (mCdmaSsm == null) {
+            return false;
+        }
+        if (UiccController.getFamilyFromRadioTechnology(radioTech) == UiccController.APP_FAM_3GPP2
+                && mCdmaSsm.getCdmaSubscriptionSource() ==
+                        CdmaSubscriptionSourceManager.SUBSCRIPTION_FROM_NV) {
+            return true;
+        }
+        return false;
+    }
+
     /**
-     * Based on the sim operator numeric, create a list for all possible
+     * Returns mccmnc for data call either from cdma_home_operator or from IccRecords
+     * @return operator numeric
+     */
+    private String getOperatorNumeric() {
+        String result;
+        if (isNvSubscription()) {
+            result = SystemProperties.get(CDMAPhone.PROPERTY_CDMA_HOME_OPERATOR_NUMERIC);
+            log("getOperatorNumberic - returning from NV: " + result);
+        } else {
+            IccRecords r = mIccRecords.get();
+            result = (r != null) ? r.getOperatorNumeric() : "";
+            log("getOperatorNumberic - returning from card: " + result);
+        }
+        return result;
+    }
+
+    /**
+     * Based on the operator numeric, create a list for all possible
      * Data Connections and setup the preferredApn.
      */
     private void createAllApnList() {
         mAllApnSettings = new ArrayList<ApnSetting>();
-        IccRecords r = mIccRecords.get();
-        String operator = (r != null) ? r.getOperatorNumeric() : "";
+        String operator = getOperatorNumeric();
         if (operator != null) {
             String selection = "numeric = '" + operator + "'";
             // query only enabled apn.
@@ -2008,9 +2141,7 @@ public final class DcTracker extends DcTrackerBase {
             }
         }
 
-        IccRecords r = mIccRecords.get();
-        String operator = (r != null) ? r.getOperatorNumeric() : "";
-
+        String operator = getOperatorNumeric();
         // This is a workaround for a bug (7305641) where we don't failover to other
         // suitable APNs if our preferred APN fails.  On prepaid ATT sims we need to
         // failover to a provisioning APN, but once we've used their default data
@@ -2028,8 +2159,7 @@ public final class DcTracker extends DcTrackerBase {
             log("buildWaitingApns: usePreferred=" + usePreferred
                     + " canSetPreferApn=" + mCanSetPreferApn
                     + " mPreferredApn=" + mPreferredApn
-                    + " operator=" + operator + " radioTech=" + radioTech
-                    + " IccRecords r=" + r);
+                    + " operator=" + operator + " radioTech=" + radioTech);
         }
 
         if (usePreferred && mCanSetPreferApn && mPreferredApn != null &&
@@ -2054,7 +2184,7 @@ public final class DcTracker extends DcTrackerBase {
                 mPreferredApn = null;
             }
         }
-        if (mAllApnSettings != null) {
+        if (mAllApnSettings != null && !mAllApnSettings.isEmpty()) {
             if (DBG) log("buildWaitingApns: mAllApnSettings=" + mAllApnSettings);
             for (ApnSetting apn : mAllApnSettings) {
                 if (DBG) log("buildWaitingApns: apn=" + apn);
@@ -2069,11 +2199,11 @@ public final class DcTracker extends DcTrackerBase {
                         }
                     }
                 } else {
-                if (DBG) {
-                    log("buildWaitingApns: couldn't handle requesedApnType="
-                            + requestedApnType);
+                    if (DBG) {
+                        log("buildWaitingApns: couldn't handle requesedApnType="
+                                + requestedApnType);
+                    }
                 }
-            }
             }
         } else {
             loge("mAllApnSettings is empty!");
@@ -2217,7 +2347,16 @@ public final class DcTracker extends DcTrackerBase {
                         cleanUpAllConnections(false, Phone.REASON_PS_RESTRICT_ENABLED);
                         mReregisterOnReconnectFailure = false;
                     }
-                    trySetupData(Phone.REASON_PS_RESTRICT_ENABLED, PhoneConstants.APN_TYPE_DEFAULT);
+                    ApnContext apnContext = mApnContexts.get(PhoneConstants.APN_TYPE_DEFAULT);
+                    if (apnContext != null) {
+                        apnContext.setReason(Phone.REASON_PS_RESTRICT_ENABLED);
+                        trySetupData(apnContext);
+                    } else {
+                        loge("**** Default ApnContext not found ****");
+                        if (Build.IS_DEBUGGABLE) {
+                            throw new RuntimeException("Default ApnContext not found");
+                        }
+                    }
                 }
                 break;
 
@@ -2239,6 +2378,20 @@ public final class DcTracker extends DcTrackerBase {
                 } else {
                     loge("EVENT_CLEAN_UP_CONNECTION request w/o apn context, call super");
                     super.handleMessage(msg);
+                }
+                break;
+
+            case DctConstants.EVENT_CDMA_SUBSCRIPTION_SOURCE_CHANGED: // fall thru
+            case DctConstants.EVENT_DATA_RAT_CHANGED:
+                // When data rat changes we might need to load different
+                // set of apns (example, LTE->1x)
+                if (onUpdateIcc()) {
+                    log("onUpdateIcc: tryRestartDataConnections " + Phone.REASON_NW_TYPE_CHANGED);
+                    tryRestartDataConnections(Phone.REASON_NW_TYPE_CHANGED);
+                } else if (isNvSubscription()){
+                    // If cdma subscription source changed to NV or data rat changed to cdma
+                    // (while subscription source was NV) - we need to trigger NV ready
+                    onNvReady();
                 }
                 break;
 
@@ -2279,28 +2432,50 @@ public final class DcTracker extends DcTrackerBase {
         return cid;
     }
 
+    /**
+     * @description This function updates mIccRecords reference to track
+     *              currently used IccRecords
+     * @return true if IccRecords changed
+     */
     @Override
-    protected void onUpdateIcc() {
+    protected boolean onUpdateIcc() {
+        boolean result = false;
         if (mUiccController == null ) {
-            return;
+            loge("onUpdateIcc: mUiccController is null. Error!");
+            return false;
         }
 
-        IccRecords newIccRecords = mUiccController.getIccRecords(UiccController.APP_FAM_3GPP);
+        int dataRat = mPhone.getServiceState().getRilDataRadioTechnology();
+        int appFamily = UiccController.getFamilyFromRadioTechnology(dataRat);
+        IccRecords newIccRecords = mUiccController.getIccRecords(appFamily);
+        log("onUpdateIcc: newIccRecords " + ((newIccRecords != null) ?
+                newIccRecords.getClass().getName() : null));
+        if (dataRat == ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN) {
+            // Ignore this. This could be due to data not registered
+            // We want to ignore RADIO_TECHNOLOGY_UNKNOWN so that we do not tear down data
+            // call in case we are out of service.
+            return false;
+        }
 
         IccRecords r = mIccRecords.get();
         if (r != newIccRecords) {
             if (r != null) {
-                log("Removing stale icc objects.");
+                log("Removing stale icc objects. " + ((r != null) ?
+                        r.getClass().getName() : null));
                 r.unregisterForRecordsLoaded(this);
                 mIccRecords.set(null);
             }
             if (newIccRecords != null) {
-                log("New records found");
+                log("New records found " + ((newIccRecords != null) ?
+                        newIccRecords.getClass().getName() : null));
                 mIccRecords.set(newIccRecords);
                 newIccRecords.registerForRecordsLoaded(
                         this, DctConstants.EVENT_RECORDS_LOADED, null);
             }
+            // Records changed -> return true
+            result = true;
         }
+        return result;
     }
 
     @Override

@@ -33,6 +33,7 @@ import android.os.Message;
 import android.os.ServiceManager;
 import android.os.UserHandle;
 import android.telephony.Rlog;
+import android.telephony.TelephonyManager;
 import android.util.Log;
 
 import com.android.internal.telephony.ISms;
@@ -96,8 +97,7 @@ public class IccSmsInterfaceManager extends ISms.Stub {
                     ar = (AsyncResult)msg.obj;
                     synchronized (mLock) {
                         if (ar.exception == null) {
-                            mSms  = (List<SmsRawData>)
-                                    buildValidRawData((ArrayList<byte[]>) ar.result);
+                            mSms = buildValidRawData((ArrayList<byte[]>) ar.result);
                             //Mark SMS as read after importing it from card.
                             markMessagesAsRead((ArrayList<byte[]>) ar.result);
                         } else {
@@ -161,10 +161,6 @@ public class IccSmsInterfaceManager extends ISms.Stub {
                  }
              }
         }
-    }
-
-    public void dispose() {
-        mDispatcher.dispose();
     }
 
     protected void updatePhoneObject(PhoneBase phone) {
@@ -827,5 +823,28 @@ public class IccSmsInterfaceManager extends ISms.Stub {
 
     public String getImsSmsFormat() {
         return mDispatcher.getImsSmsFormat();
+    }
+
+    /** @hide **/
+    public boolean isShortSMSCode(String destAddr) {
+        TelephonyManager telephonyManager =
+                (TelephonyManager) mContext.getSystemService(Context.TELEPHONY_SERVICE);
+        int smsCategory = SmsUsageMonitor.CATEGORY_NOT_SHORT_CODE;
+
+        String countryIso = telephonyManager.getSimCountryIso();
+        if (countryIso == null || countryIso.length() != 2) {
+            countryIso = telephonyManager.getNetworkCountryIso();
+        }
+
+        smsCategory = SmsUsageMonitor.mergeShortCodeCategories(smsCategory,
+                mPhone.mSmsUsageMonitor.checkDestination(destAddr, countryIso));
+
+        if (smsCategory == SmsUsageMonitor.CATEGORY_NOT_SHORT_CODE
+                || smsCategory == SmsUsageMonitor.CATEGORY_FREE_SHORT_CODE
+                || smsCategory == SmsUsageMonitor.CATEGORY_STANDARD_SHORT_CODE) {
+            return false;    // not a premium short code
+        }
+
+        return true;
     }
 }
