@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # This is NOT legacy
-ifeq ($(TARGET_TELEPHONY_VARIANT),legacy)
+ifeq ($(TARGET_TELEPHONY_VARIANT), legacy)
 
 # enable this build only when platform library is available
 ifeq ($(TARGET_BUILD_JAVA_SUPPORT_LEVEL),platform)
