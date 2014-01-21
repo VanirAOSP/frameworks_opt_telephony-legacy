@@ -451,11 +451,26 @@ public final class DataConnection extends StateMachine {
         }
 
         mPhone.mCi.setupDataCall(
-                Integer.toString(getRilRadioTechnology(cp.mRilRat)),
+                Integer.toString(getRilRadioTechnology(cp.mRilRat + 2)),
                 Integer.toString(cp.mProfileId),
                 mApnSetting.apn, mApnSetting.user, mApnSetting.password,
                 Integer.toString(authType),
                 protocol, msg);
+    }
+
+    private int getRilRadioTechnology(int def) {
+        if (mPhone.mCi.getRilVersion() < 6) {
+            int phoneType = mPhone.getPhoneType();
+            if (phoneType == PhoneConstants.PHONE_TYPE_GSM) {
+                return RILConstants.SETUP_DATA_TECH_GSM;
+            } else if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
+                return RILConstants.SETUP_DATA_TECH_CDMA;
+            } else {
+                throw new RuntimeException("Unknown phoneType " + phoneType + ", should not happen");
+            }
+        } else {
+            return def;
+        }
     }
 
     /**
@@ -588,21 +603,6 @@ public final class DataConnection extends StateMachine {
             notifyAllWithEvent(alreadySent, DctConstants.EVENT_DISCONNECT_DONE, reason);
         }
         if (DBG) log("NotifyDisconnectCompleted DisconnectParams=" + dp);
-    }
-
-    private int getRilRadioTechnology(int rilRadioTechnology) {
-        if (mPhone.mCi.getRilVersion() < 6) {
-            int phoneType = mPhone.getPhoneType();
-            if (phoneType == PhoneConstants.PHONE_TYPE_GSM) {
-                return RILConstants.SETUP_DATA_TECH_GSM;
-            } else if (phoneType == PhoneConstants.PHONE_TYPE_CDMA) {
-                return RILConstants.SETUP_DATA_TECH_CDMA;
-            } else {
-                throw new RuntimeException("Unknown phoneType " + phoneType + ", should not happen");
-            }
-        } else {
-            return rilRadioTechnology + 2;
-        }
     }
 
     /*

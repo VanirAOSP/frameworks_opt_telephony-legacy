@@ -669,16 +669,9 @@ public class SamsungCDMAv6RIL extends RIL implements CommandsInterface {
             response[i] = p.readInt();
         }
 
-        if(response[3] < 0){
-           response[3] = -response[3];
-        }
-        // Scale cdmaDbm so Samsung's -95..-105 range for SIGNAL_STRENGTH_POOR
-        // fits in AOSP's -95..-100 range
-        if(response[2] > 95){
-        //   Rlog.d(RILJ_LOG_TAG, "SignalStrength: Scaling cdmaDbm \"" + response[2] + "\" for smaller SIGNAL_STRENGTH_POOR bucket.");
-           response[2] = ((response[2]-96)/2)+96;
-        }
-        // Framework takes care of the rest for us.
+        // Take just the least significant byte as the signal strength
+        response[2] %= 256;
+        response[4] %= 256;
 
         SignalStrength signalStrength = new SignalStrength(
             response[0], response[1], response[2], response[3], response[4],
