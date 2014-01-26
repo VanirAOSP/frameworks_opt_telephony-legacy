@@ -91,7 +91,7 @@ public class GSMPhone extends PhoneBase {
     // from this file will go into the radio log rather than the main
     // log.  (Use "adb logcat -b radio" to see them.)
     static final String LOG_TAG = "GSMPhone";
-    private static final boolean LOCAL_DEBUG = true;
+    private static final boolean LOCAL_DEBUG = false;
     private static final boolean VDBG = false; /* STOPSHIP if true */
     private static final boolean DBG_PORT = false; /* STOPSHIP if true */
 
