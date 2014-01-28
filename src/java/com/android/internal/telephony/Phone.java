@@ -45,7 +45,7 @@ import java.util.List;
 public interface Phone {
 
     /** used to enable additional debug messages */
-    static final boolean DEBUG_PHONE = true;
+    static final boolean DEBUG_PHONE = false;
 
     public enum DataActivityState {
         /**
